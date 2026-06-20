@@ -207,7 +207,19 @@ def main() -> None:
     from minicode.memory import MemoryManager
     memory_mgr = MemoryManager(project_root=Path(cwd))
     logger.info("Memory manager initialized")
-    
+
+    # Background memory: a cheap LLM distills durable facts from per-turn
+    # summaries into layered memory, off the hot path. Disable with
+    # MINI_CODE_BACKGROUND_MEMORY=0.
+    from minicode.background_memory import BackgroundMemoryExtractor
+    bg_memory = BackgroundMemoryExtractor(
+        model_adapter=model,
+        memory_manager=memory_mgr,
+        workspace=cwd,
+        enabled=os.environ.get("MINI_CODE_BACKGROUND_MEMORY", "1") != "0",
+    )
+    logger.info("Background memory extractor initialized (enabled=%s)", bg_memory.enabled)
+
     messages = [
         {
             "role": "system",
@@ -300,6 +312,7 @@ def main() -> None:
                     ),
                 }
                 permissions.begin_turn()
+                turn_tools: list[str] = []
                 messages = run_agent_turn(
                     model=model,
                     tools=tools,
@@ -307,9 +320,10 @@ def main() -> None:
                     cwd=cwd,
                     permissions=permissions,
                     context_manager=context_mgr,
+                    on_tool_start=lambda name, _inp: turn_tools.append(name),
                 )
                 permissions.end_turn()
-                
+
                 # Log context usage after turn
                 if context_mgr:
                     stats = context_mgr.get_stats()
@@ -318,6 +332,9 @@ def main() -> None:
                 if last_assistant:
                     _append_transcript(transcript, kind="assistant", body=last_assistant["content"])
                     print(last_assistant["content"])
+                    # Feed the per-turn summary (user question + agent summary +
+                    # tool names) to the background memory curator.
+                    bg_memory.record_turn(user_input, last_assistant["content"], turn_tools)
             return
 
         run_tty_app(
@@ -337,7 +354,14 @@ def main() -> None:
         from minicode.logging_config import get_logger
         logger = get_logger("main")
         logger.info("Shutting down...")
-        
+
+        # Flush background memory: run a final extraction over remaining turns.
+        try:
+            bg_memory.close()
+            logger.info("Background memory flushed")
+        except Exception as e:
+            logger.warning("Error flushing background memory: %s", e)
+
         # Dispose tools (closes MCP connections)
         try:
             tools.dispose()

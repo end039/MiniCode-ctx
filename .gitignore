@@ -38,7 +38,7 @@ Thumbs.db
 
 # 开发/规划笔记(不提交)
 /roadmap.md
-/context-compaction-design.md
+*-design.md
 /dev-notes/
 *.dev.md
 
