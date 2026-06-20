@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from minicode.context_compactor import ContextCompactor
 from minicode.context_manager import ContextManager, estimate_message_tokens
 from minicode.logging_config import get_logger
 from minicode.permissions import PermissionManager
@@ -92,6 +93,7 @@ def run_agent_turn(
     on_assistant_message: Callable[[str], None] | None = None,
     on_progress_message: Callable[[str], None] | None = None,
     context_manager: ContextManager | None = None,
+    compactor: ContextCompactor | None = None,
 ) -> list[ChatMessage]:
     current_messages = list(messages)
     saw_tool_result = False
@@ -100,6 +102,11 @@ def run_agent_turn(
     tool_error_count = 0
     step = 0
 
+    # 上下文压缩器：缺省时基于当前 model 适配器构建（同一适配器复用于摘要调用）
+    if compactor is None:
+        model_name = context_manager.model if context_manager else "default"
+        compactor = ContextCompactor(model_adapter=model, model_name=model_name)
+
     # 检查上下文状态
     if context_manager:
         context_manager.messages = current_messages
@@ -107,15 +114,14 @@ def run_agent_turn(
         logger.info("Context: %d tokens (%.0f%%), %d messages", 
                    stats.total_tokens, stats.usage_percentage, stats.messages_count)
         
-        # 如果需要压缩，自动执行
-        if context_manager.should_auto_compact():
-            logger.warning("Context near limit, auto-compacting...")
-            current_messages = context_manager.compact_messages()
-            if on_assistant_message:
-                on_assistant_message(context_manager.get_context_summary())
+    # 注意：上下文压缩已移入循环内部，在每次 model.next 之前触发（见下）
 
     while max_steps is None or step < max_steps:
         step += 1
+
+        # (a)(b) 答前压缩 + 轮内多级：每次调用 LLM 之前检查并按需压缩上下文
+        current_messages = compactor.before_model_call(current_messages, step=step)
+
         next_step: AgentStep
         try:
             next_step = model.next(current_messages)

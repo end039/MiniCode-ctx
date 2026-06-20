@@ -35,3 +35,17 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# 开发/规划笔记(不提交)
+/roadmap.md
+/context-compaction-design.md
+/dev-notes/
+*.dev.md
+
+# 本地环境配置(引用 .bashrc 中的密钥,不提交)
+/deepseek.env
+
+# MiniCode 运行时状态
+.mini-code-memory/
+.mini-code-memory-local/
+context_state.json
