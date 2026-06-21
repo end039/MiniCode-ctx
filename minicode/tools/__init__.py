@@ -9,6 +9,7 @@ from minicode.tools.code_nav import find_symbols_tool, find_references_tool, get
 from minicode.tools.code_review import code_review_tool
 from minicode.tools.db_explorer import db_explorer_tool
 from minicode.tools.diff_viewer import diff_viewer_tool
+from minicode.tools.dispatch_agent import create_dispatch_agent_tool
 from minicode.tools.docker_helper import docker_helper_tool
 from minicode.tools.edit_file import edit_file_tool
 from minicode.tools.file_tree import file_tree_tool
@@ -31,9 +32,20 @@ from minicode.tools.web_search import web_search_tool
 from minicode.tools.write_file import write_file_tool
 
 
-def create_default_tool_registry(cwd: str, runtime: dict | None = None) -> ToolRegistry:
+def create_default_tool_registry(
+    cwd: str,
+    runtime: dict | None = None,
+    subagent_tracker=None,
+) -> ToolRegistry:
     skills = [asdict(skill) for skill in discover_skills(cwd)]
     mcp = create_mcp_backed_tools(cwd=cwd, mcp_servers=dict(runtime.get("mcpServers", {})) if runtime else {})
+    # Multi-agent: expose dispatch_agent only when a real model is configured
+    # (the sub-agent needs to call the provider). Mock runs skip it.
+    subagent_tools = (
+        [create_dispatch_agent_tool(cwd=cwd, runtime=runtime, tracker=subagent_tracker)]
+        if runtime is not None
+        else []
+    )
     return ToolRegistry(
         [
             # User interaction
@@ -77,6 +89,8 @@ def create_default_tool_registry(cwd: str, runtime: dict | None = None) -> ToolR
             governance_audit_tool,
             # Skills
             create_load_skill_tool(cwd),
+            # Multi-agent: read-only exploration sub-agent
+            *subagent_tools,
             # MCP tools
             *mcp["tools"],
         ],

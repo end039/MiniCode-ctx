@@ -64,6 +64,8 @@ from minicode.tui.chrome import (
     SUBTLE,
     RESET,
     REVERSE,
+    BOLD,
+    BRIGHT_CYAN,
 )
 from minicode.tui.input import render_input_prompt
 from minicode.tui.input_parser import (
@@ -252,6 +254,8 @@ class ScreenState:
     last_user_input: str = ""      # for background memory record_turn
     # /resume interactive picker overlay
     session_picker: SessionPicker | None = None
+    # Multi-agent: live tracker of in-flight exploration sub-agents (bottom bar)
+    subagents: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +782,11 @@ def _render_screen(args: TtyAppArgs, state: ScreenState) -> None:
     if contextual_help:
         buf.append(f"\n{SUBTLE}{contextual_help}{RESET}")
 
+    # Multi-agent: highlighted live sub-agent count (only while one runs).
+    subagent_line = _format_subagent_indicator(state)
+    if subagent_line:
+        buf.append(f"\n{subagent_line}")
+
     # Context usage meter, bottom-right (Claude Code style).
     cols, _rows = _get_terminal_size()
     meter = _format_context_meter(state)
@@ -785,6 +794,38 @@ def _render_screen(args: TtyAppArgs, state: ScreenState) -> None:
 
     sys.stdout.write("".join(buf))
     sys.stdout.flush()
+
+
+def _format_subagent_indicator(state: ScreenState) -> str:
+    """Render the highlighted bottom-bar sub-agent count, or '' when idle.
+
+    Counts only dispatched exploration sub-agents (the background-memory thread
+    is never registered with the tracker, so it is excluded by construction).
+    """
+    tracker = getattr(state, "subagents", None)
+    if tracker is None:
+        return ""
+    try:
+        records = tracker.active_records()
+    except Exception:  # noqa: BLE001
+        return ""
+    n = len(records)
+    if n <= 0:
+        return ""
+    label = "subagent" if n == 1 else "subagents"
+    detail = ""
+    if records:
+        first = records[0]
+        task = (first.task or "").replace("\n", " ").strip()
+        if len(task) > 40:
+            task = task[:40] + "…"
+        detail = f" · {first.agent_type}: {task}"
+        if n > 1:
+            detail += f" (+{n - 1} more)"
+    spinner = "⚡"
+    text = f" {spinner} {n} {label} running{detail} "
+    # Highlighted (reverse video + bold) so it stands out at the bottom.
+    return f"{BOLD}{REVERSE}{BRIGHT_CYAN}{text}{RESET}"
 
 
 def _format_context_meter(state: ScreenState) -> str:
@@ -1561,12 +1602,14 @@ def run_tty_app(
     permissions: PermissionManager,
     resume_session: str | None = None,
     list_sessions_only: bool = False,
+    subagent_tracker: Any = None,
 ) -> list[ChatMessage]:
     """Event-driven full-screen TTY application, ported from the TypeScript version.
-    
+
     Args:
         resume_session: Session ID to resume, or "latest" for most recent
         list_sessions_only: If True, print session list and exit
+        subagent_tracker: Shared SubAgentTracker for the live bottom-bar count.
     """
 
     args = TtyAppArgs(
@@ -1672,6 +1715,12 @@ def run_tty_app(
 
     def rerender() -> None:
         throttled.request()
+
+    # Multi-agent: expose the tracker to the renderer and have start/finish of
+    # any sub-agent trigger a (throttled) re-render of the bottom-bar count.
+    state.subagents = subagent_tracker
+    if subagent_tracker is not None:
+        subagent_tracker.on_change = rerender
 
     # ---- Context compaction + background memory + usage meter ----
     max_context = int(os.environ.get("MINI_CODE_CONTEXT_WINDOW") or 256_000)

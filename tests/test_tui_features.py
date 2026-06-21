@@ -149,6 +149,37 @@ class TestThinkingRoundTrip(unittest.TestCase):
         self.assertEqual(assistant["content"][1]["type"], "tool_use")
 
 
+class TestSubAgentIndicator(unittest.TestCase):
+    def test_hidden_when_no_tracker_or_idle(self):
+        from minicode.subagent import SubAgentTracker
+        # No tracker -> empty
+        s = tty.ScreenState()
+        self.assertEqual(tty._format_subagent_indicator(s), "")
+        # Tracker with nothing active -> empty
+        s.subagents = SubAgentTracker()
+        self.assertEqual(tty._format_subagent_indicator(s), "")
+
+    def test_shown_and_highlighted_when_active(self):
+        from minicode.subagent import SubAgentTracker
+        tracker = SubAgentTracker()
+        tracker.start("explore", "where is auth handled and how does it flow")
+        s = tty.ScreenState(subagents=tracker)
+        out = tty._format_subagent_indicator(s)
+        self.assertIn("1 subagent running", out)
+        self.assertIn("explore:", out)
+        self.assertIn(REVERSE, out)  # reverse-video highlight
+
+    def test_counts_multiple(self):
+        from minicode.subagent import SubAgentTracker
+        tracker = SubAgentTracker()
+        tracker.start("explore", "task one")
+        tracker.start("explore", "task two")
+        s = tty.ScreenState(subagents=tracker)
+        out = tty._format_subagent_indicator(s)
+        self.assertIn("2 subagents running", out)
+        self.assertIn("+1 more", out)
+
+
 class TestForceCompact(unittest.TestCase):
     class _Fake:
         def next(self, messages):

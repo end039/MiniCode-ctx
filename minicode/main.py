@@ -186,7 +186,14 @@ def main() -> None:
         )
 
     prompt_handler = _make_cli_permission_prompt() if sys.stdin.isatty() else None
-    tools = create_default_tool_registry(cwd, runtime=runtime)
+    # Multi-agent: a shared tracker for in-flight exploration sub-agents. It is
+    # closed over by the dispatch_agent tool and read by the TUI for its live
+    # bottom-bar count (the background-memory thread is never registered here).
+    from minicode.subagent import SubAgentTracker
+    subagent_tracker = SubAgentTracker()
+    tools = create_default_tool_registry(
+        cwd, runtime=runtime, subagent_tracker=subagent_tracker
+    )
     permissions = PermissionManager(cwd, prompt=prompt_handler)
     model = (
         MockModelAdapter()
@@ -346,6 +353,7 @@ def main() -> None:
             permissions=permissions,
             resume_session=args.resume,
             list_sessions_only=args.list_sessions,
+            subagent_tracker=subagent_tracker,
         )
     except KeyboardInterrupt:
         print("\n\nInterrupted by user. Shutting down gracefully...")

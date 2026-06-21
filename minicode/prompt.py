@@ -108,6 +108,7 @@ def build_system_prompt(
         "If you need user clarification, call the ask_user tool with one concise question and wait for the user reply. Do not ask clarifying questions as plain assistant text.",
         "Do not choose subjective preferences such as colors, visual style, copy tone, or naming unless the user explicitly told you to decide yourself.",
         "When using read_file, pay attention to the header fields. If it says TRUNCATED: yes, continue reading with a larger offset before concluding that the file itself is cut off.",
+        "Delegating exploration: when the user asks a broad 'where is X / how does Y work / which files do Z' question that would require reading many files, prefer calling the dispatch_agent tool (when it is available) with one self-contained 'task' instead of reading many files yourself. It runs an isolated read-only sub-agent and returns a concise summary, keeping your own context clean. For targeted edits, for running commands, or when you already know the exact file, use the file tools directly.",
         "If the user names a skill or clearly asks for a workflow that matches a listed skill, call load_skill before following it.",
         "Structured response protocol:",
         "- When you are still working and will continue with more tool calls, start your text with <progress>.",
