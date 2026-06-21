@@ -125,6 +125,12 @@ def _to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str, list[di
         if role == "user":
             _push_anthropic_message(converted, "user", _to_text_block(message["content"]))
             continue
+        if role == "assistant_thinking":
+            # Echo the raw thinking blocks back (must precede text/tool_use in the
+            # same assistant turn). _push_anthropic_message merges them in order.
+            for block in message.get("blocks", []) or []:
+                _push_anthropic_message(converted, "assistant", block)
+            continue
         if role in {"assistant", "assistant_progress"}:
             _push_anthropic_message(converted, "assistant", _to_text_block(_to_assistant_text(message)))
             continue
@@ -149,17 +155,17 @@ def _to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str, list[di
 
 
 def _should_disable_thinking(runtime: dict[str, Any]) -> bool:
-    """Disable extended thinking unless on the official Anthropic API.
+    """Whether to send ``thinking:{type:disabled}``.
 
-    ``MINI_CODE_EXTENDED_THINKING=1`` forces thinking on; ``=0`` forces it off.
+    Default is **False**: extended thinking stays on and the adapter round-trips
+    the returned thinking blocks (see ``assistant_thinking`` handling). Set
+    ``MINI_CODE_EXTENDED_THINKING=0`` to force thinking off (a safe fallback if a
+    provider rejects the round-trip); ``=1`` is the explicit "keep on".
     """
     override = os.environ.get("MINI_CODE_EXTENDED_THINKING", "").strip()
-    if override == "1":
-        return False
     if override == "0":
         return True
-    base_url = str(runtime.get("baseUrl", "")).lower()
-    return "api.anthropic.com" not in base_url
+    return False
 
 
 class AnthropicModelAdapter:
@@ -235,6 +241,7 @@ class AnthropicModelAdapter:
         text_parts: list[str] = []
         block_types: list[str] = []
         ignored_block_types: list[str] = []
+        thinking_blocks: list[dict[str, Any]] = []
 
         for block in data.get("content", []) if isinstance(data, dict) else []:
             block_type = block.get("type")
@@ -243,6 +250,9 @@ class AnthropicModelAdapter:
                 text_parts.append(block["text"])
             elif block_type == "tool_use" and isinstance(block.get("id"), str) and isinstance(block.get("name"), str):
                 tool_calls.append({"id": block["id"], "toolName": block["name"], "input": block.get("input")})
+            elif block_type in ("thinking", "redacted_thinking"):
+                # Preserve verbatim (incl. signature) so it can be echoed back.
+                thinking_blocks.append(block)
             else:
                 ignored_block_types.append(str(block_type))
 
@@ -268,6 +278,7 @@ class AnthropicModelAdapter:
                 contentKind="progress" if kind == "progress" else None,
                 diagnostics=diagnostics,
                 usage=usage,
+                thinking=thinking_blocks or None,
             )
         return AgentStep(
             type="assistant",
@@ -275,4 +286,5 @@ class AnthropicModelAdapter:
             kind=kind,
             diagnostics=diagnostics,
             usage=usage,
+            thinking=thinking_blocks or None,
         )

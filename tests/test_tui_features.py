@@ -112,25 +112,41 @@ class TestSessionPicker(unittest.TestCase):
         self.assertIn("No saved sessions", out)
 
 
-class TestThinkingDisable(unittest.TestCase):
-    def test_disabled_for_non_anthropic(self):
+class TestThinkingRoundTrip(unittest.TestCase):
+    def test_thinking_on_by_default(self):
+        # Default: thinking stays ON (round-trip handles the echo-back).
         from minicode.anthropic_adapter import _should_disable_thinking
-        self.assertTrue(
+        self.assertFalse(
             _should_disable_thinking({"baseUrl": "https://api.deepseek.com/anthropic"})
         )
-        self.assertFalse(
-            _should_disable_thinking({"baseUrl": "https://api.anthropic.com"})
-        )
 
-    def test_env_overrides(self):
+    def test_env_can_force_off(self):
         from minicode.anthropic_adapter import _should_disable_thinking
-        os.environ["MINI_CODE_EXTENDED_THINKING"] = "1"
+        os.environ["MINI_CODE_EXTENDED_THINKING"] = "0"
         try:
-            self.assertFalse(
+            self.assertTrue(
                 _should_disable_thinking({"baseUrl": "https://api.deepseek.com/anthropic"})
             )
         finally:
             os.environ.pop("MINI_CODE_EXTENDED_THINKING", None)
+
+    def test_thinking_blocks_round_trip_into_request(self):
+        # assistant_thinking messages re-emit their raw blocks before the turn.
+        from minicode.anthropic_adapter import _to_anthropic_messages
+        blocks = [{"type": "thinking", "thinking": "let me reason", "signature": "sig"}]
+        msgs = [
+            {"role": "user", "content": "do it"},
+            {"role": "assistant_thinking", "blocks": blocks},
+            {"role": "assistant_tool_call", "toolUseId": "t1", "toolName": "ls", "input": {}},
+            {"role": "tool_result", "toolUseId": "t1", "toolName": "ls", "content": "a", "isError": False},
+        ]
+        _system, converted = _to_anthropic_messages(msgs)
+        # the thinking block and the tool_use merge into one assistant message,
+        # thinking first.
+        assistant = next(m for m in converted if m["role"] == "assistant")
+        self.assertEqual(assistant["content"][0]["type"], "thinking")
+        self.assertEqual(assistant["content"][0]["signature"], "sig")
+        self.assertEqual(assistant["content"][1]["type"], "tool_use")
 
 
 class TestForceCompact(unittest.TestCase):

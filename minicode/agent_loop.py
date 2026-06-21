@@ -256,8 +256,19 @@ def run_agent_turn(
 
             if on_assistant_message:
                 on_assistant_message(next_step.content)
+            if next_step.thinking:
+                current_messages.append(
+                    {"role": "assistant_thinking", "blocks": next_step.thinking}
+                )
             current_messages.append({"role": "assistant", "content": next_step.content})
             return current_messages
+
+        # Echo this turn's thinking blocks before its content/tool calls so the
+        # extended-thinking round-trip stays valid on the next request.
+        if next_step.thinking:
+            current_messages.append(
+                {"role": "assistant_thinking", "blocks": next_step.thinking}
+            )
 
         if next_step.content:
             role = "assistant_progress" if next_step.contentKind == "progress" else "assistant"
@@ -279,7 +290,35 @@ def run_agent_turn(
         if not next_step.calls and next_step.content and next_step.contentKind != "progress":
             return current_messages
 
+        # Emit ALL tool_use blocks of this step as one assistant message, then
+        # ALL tool_result blocks as one user message (canonical Anthropic form).
+        # Interleaving them would split the turn into multiple assistant messages
+        # and break extended-thinking validation on the follow-up request.
         for call in next_step.calls:
+            current_messages.append(
+                {
+                    "role": "assistant_tool_call",
+                    "toolUseId": call["id"],
+                    "toolName": call["toolName"],
+                    "input": call["input"],
+                }
+            )
+
+        awaiting_output: str | None = None
+        for call in next_step.calls:
+            if awaiting_output is not None:
+                # A prior call in this batch awaited user input; the rest can't
+                # run this turn, but every tool_use still needs a tool_result.
+                current_messages.append(
+                    {
+                        "role": "tool_result",
+                        "toolUseId": call["id"],
+                        "toolName": call["toolName"],
+                        "content": "(skipped: awaiting user input)",
+                        "isError": False,
+                    }
+                )
+                continue
             if on_tool_start:
                 on_tool_start(call["toolName"], call["input"])
             result = tools.execute(
@@ -292,14 +331,6 @@ def run_agent_turn(
             saw_tool_result = True
             if not result.ok:
                 tool_error_count += 1
-            current_messages.append(
-                {
-                    "role": "assistant_tool_call",
-                    "toolUseId": call["id"],
-                    "toolName": call["toolName"],
-                    "input": call["input"],
-                }
-            )
             # Spill oversized tool output to disk; keep only a preview + path in
             # the context (the UI callback above already received the full text).
             context_output = maybe_persist_tool_result(result.output, call["id"])
@@ -313,10 +344,13 @@ def run_agent_turn(
                 }
             )
             if result.awaitUser:
-                if on_assistant_message:
-                    on_assistant_message(result.output)
-                current_messages.append({"role": "assistant", "content": result.output})
-                return current_messages
+                awaiting_output = result.output
+
+        if awaiting_output is not None:
+            if on_assistant_message:
+                on_assistant_message(awaiting_output)
+            current_messages.append({"role": "assistant", "content": awaiting_output})
+            return current_messages
 
     fallback = "Reached the maximum tool step limit for this turn."
     if on_assistant_message:

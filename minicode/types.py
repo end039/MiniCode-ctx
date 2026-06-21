@@ -10,6 +10,7 @@ class ChatMessage(TypedDict, total=False):
         "user",
         "assistant",
         "assistant_progress",
+        "assistant_thinking",
         "assistant_tool_call",
         "tool_result",
     ]
@@ -18,6 +19,9 @@ class ChatMessage(TypedDict, total=False):
     toolName: str
     input: Any
     isError: bool
+    # Raw provider thinking blocks (type/thinking/signature), echoed back on
+    # follow-up requests so extended thinking can stay enabled.
+    blocks: list[Any]
 
 
 class ToolCall(TypedDict):
@@ -45,6 +49,9 @@ class AgentStep:
     # cache_read_input_tokens, cache_creation_input_tokens). None for adapters
     # that don't report usage (e.g. the mock model).
     usage: dict[str, int] | None = None
+    # Raw thinking/redacted_thinking blocks returned this turn, to be echoed
+    # back on follow-up requests (extended-thinking round-trip).
+    thinking: list[Any] | None = None
 
 
 class ModelAdapter(Protocol):

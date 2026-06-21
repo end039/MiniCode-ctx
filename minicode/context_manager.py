@@ -101,7 +101,14 @@ def estimate_message_tokens(message: dict[str, Any]) -> int:
     if "input" in message:
         input_str = json.dumps(message["input"]) if isinstance(message["input"], dict) else str(message["input"])
         tokens += estimate_tokens(input_str)
-    
+
+    # Thinking blocks (assistant_thinking round-trip messages)
+    blocks = message.get("blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if isinstance(block, dict):
+                tokens += estimate_tokens(str(block.get("thinking", "")))
+
     return tokens
 
 
