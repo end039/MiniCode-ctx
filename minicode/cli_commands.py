@@ -31,6 +31,8 @@ SLASH_COMMANDS = [
     SlashCommand("/config", "/config", "Show configuration diagnostics and validation."),
     SlashCommand("/history", "/history", "Show recent prompt history from ~/.mini-code/history.json."),
     SlashCommand("/clear", "/clear", "Clear the current transcript view."),
+    SlashCommand("/compact", "/compact", "Manually compact (summarize) the conversation context now."),
+    SlashCommand("/resume", "/resume", "Pick a saved session for this project (↑/↓ + Enter)."),
     SlashCommand("/retry", "/retry", "Retry the last natural-language prompt in this session."),
     SlashCommand("/transcript-save", "/transcript-save <path>", "Save the current session transcript to a text file."),
     SlashCommand("/model", "/model", "Show the current model."),
@@ -155,34 +157,31 @@ def try_handle_local_command(user_input: str, tools=None) -> str | None:
         return format_config_diagnostic()
 
     if user_input == "/memory":
-        # Memory system display
+        # Memory system display (layered MEMORY.md across user/project/local).
         try:
-            from minicode.memory import MemoryManager
-            from pathlib import Path
-            memory_mgr = MemoryManager(project_root=Path(cwd))
-            
+            import os
+            from minicode.memory import MemoryManager, MemoryScope
+
+            memory_mgr = MemoryManager(workspace=os.getcwd())
+            stats = memory_mgr.get_stats()
+
             lines = ["Memory System Status", "=" * 40, ""]
-            
-            # Show summary
-            summary = memory_mgr.get_summary()
-            lines.append(f"User memory: {summary['user_entries']} entries")
-            lines.append(f"Project memory: {summary['project_entries']} entries")
-            lines.append(f"Local memory: {summary['local_entries']} entries")
-            lines.append(f"Total: {summary['total_entries']} entries")
+            for scope in (MemoryScope.USER, MemoryScope.PROJECT, MemoryScope.LOCAL):
+                s = stats.get(scope.value, {})
+                lines.append(f"{scope.value.title()} memory: {s.get('entries', 0)} entries")
             lines.append("")
-            
-            # Show recent entries
-            lines.append("Recent Entries:")
-            recent = memory_mgr.search("", scope=None)[:10]  # Get 10 most recent
+
+            lines.append("Recent entries:")
+            recent = memory_mgr.search("", scope=None)[:10]
             if recent:
                 for entry in recent:
                     tags_str = f" [{', '.join(entry.tags)}]" if entry.tags else ""
-                    lines.append(f"  - {entry.content[:80]}{tags_str}")
+                    lines.append(f"  - [{entry.scope.value}] {entry.content[:80]}{tags_str}")
             else:
                 lines.append("  No entries yet")
-            
+
             return "\n".join(lines)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return f"Error loading memory: {e}"
 
     if user_input == "/context":

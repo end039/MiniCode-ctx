@@ -231,6 +231,13 @@ class AnthropicModelAdapter:
             ignoredBlockTypes=ignored_block_types,
         )
 
+        raw_usage = data.get("usage") if isinstance(data, dict) else None
+        usage = (
+            {k: int(v) for k, v in raw_usage.items() if isinstance(v, (int, float))}
+            if isinstance(raw_usage, dict)
+            else None
+        )
+
         if tool_calls:
             return AgentStep(
                 type="tool_calls",
@@ -238,5 +245,12 @@ class AnthropicModelAdapter:
                 content=parsed_text,
                 contentKind="progress" if kind == "progress" else None,
                 diagnostics=diagnostics,
+                usage=usage,
             )
-        return AgentStep(type="assistant", content=parsed_text, kind=kind, diagnostics=diagnostics)
+        return AgentStep(
+            type="assistant",
+            content=parsed_text,
+            kind=kind,
+            diagnostics=diagnostics,
+            usage=usage,
+        )

@@ -41,6 +41,10 @@ class AgentStep:
     calls: list[ToolCall] = field(default_factory=list)
     contentKind: Literal["progress"] | None = None
     diagnostics: StepDiagnostics | None = None
+    # Real token usage reported by the provider (input_tokens, output_tokens,
+    # cache_read_input_tokens, cache_creation_input_tokens). None for adapters
+    # that don't report usage (e.g. the mock model).
+    usage: dict[str, int] | None = None
 
 
 class ModelAdapter(Protocol):

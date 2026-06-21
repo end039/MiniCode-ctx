@@ -5,6 +5,7 @@ from typing import Callable
 from minicode.context_compactor import ContextCompactor
 from minicode.context_manager import ContextManager, estimate_message_tokens
 from minicode.logging_config import get_logger
+from minicode.tool_result_store import maybe_persist_tool_result
 from minicode.permissions import PermissionManager
 from minicode.tooling import ToolContext, ToolRegistry
 from minicode.types import AgentStep, ChatMessage, ModelAdapter
@@ -92,6 +93,8 @@ def run_agent_turn(
     on_tool_result: Callable[[str, str, bool], None] | None = None,
     on_assistant_message: Callable[[str], None] | None = None,
     on_progress_message: Callable[[str], None] | None = None,
+    on_usage: Callable[[dict], None] | None = None,
+    on_compaction: Callable[[str, float], None] | None = None,
     context_manager: ContextManager | None = None,
     compactor: ContextCompactor | None = None,
 ) -> list[ChatMessage]:
@@ -120,7 +123,9 @@ def run_agent_turn(
         step += 1
 
         # (a)(b) 答前压缩 + 轮内多级：每次调用 LLM 之前检查并按需压缩上下文
-        current_messages = compactor.before_model_call(current_messages, step=step)
+        current_messages = compactor.before_model_call(
+            current_messages, step=step, on_event=on_compaction
+        )
 
         next_step: AgentStep
         try:
@@ -150,6 +155,20 @@ def run_agent_turn(
                 on_assistant_message(fallback)
             current_messages.append({"role": "assistant", "content": fallback})
             return current_messages
+
+        # Real provider usage: feed the compactor (replaces token estimate) and
+        # surface to the UI context meter.
+        usage = getattr(next_step, "usage", None)
+        if usage:
+            total = (
+                int(usage.get("input_tokens", 0))
+                + int(usage.get("cache_read_input_tokens", 0))
+                + int(usage.get("cache_creation_input_tokens", 0))
+                + int(usage.get("output_tokens", 0))
+            )
+            compactor.set_real_tokens(total)
+            if on_usage:
+                on_usage(usage)
 
         if next_step.type == "assistant":
             is_empty = _is_empty_assistant_response(next_step.content)
@@ -281,12 +300,15 @@ def run_agent_turn(
                     "input": call["input"],
                 }
             )
+            # Spill oversized tool output to disk; keep only a preview + path in
+            # the context (the UI callback above already received the full text).
+            context_output = maybe_persist_tool_result(result.output, call["id"])
             current_messages.append(
                 {
                     "role": "tool_result",
                     "toolUseId": call["id"],
                     "toolName": call["toolName"],
-                    "content": result.output,
+                    "content": context_output,
                     "isError": not result.ok,
                 }
             )

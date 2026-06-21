@@ -23,12 +23,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from minicode.agent_loop import run_agent_turn
+from minicode.background_memory import BackgroundMemoryExtractor
 from minicode.background_tasks import list_background_tasks
 from minicode.cli_commands import (
     SLASH_COMMANDS,
     find_matching_slash_commands,
     try_handle_local_command,
 )
+from minicode.context_compactor import ContextCompactor
+from minicode.memory import MemoryManager
 from minicode.cost_tracker import CostTracker
 from minicode.history import load_history_entries, save_history_entries
 from minicode.local_tool_shortcuts import parse_local_tool_shortcut
@@ -37,6 +40,7 @@ from minicode.prompt import build_system_prompt
 from minicode.session import (
     AutosaveManager,
     SessionData,
+    SessionMetadata,
     create_new_session,
     format_session_list,
     format_session_resume,
@@ -59,6 +63,7 @@ from minicode.tui.chrome import (
     render_tool_panel,
     SUBTLE,
     RESET,
+    REVERSE,
 )
 from minicode.tui.input import render_input_prompt
 from minicode.tui.input_parser import (
@@ -192,6 +197,25 @@ class AggregatedEditProgress:
 
 
 @dataclass
+class SessionPicker:
+    """Overlay state for the /resume interactive session picker."""
+    sessions: list[SessionMetadata] = field(default_factory=list)
+    index: int = 0
+
+
+# Slash commands that are actually wired up in the TUI. Declarations in
+# cli_commands.SLASH_COMMANDS that are not listed here are hidden from the
+# command menu (they remain declared, just not exposed). See task: gate
+# unimplemented commands.
+IMPLEMENTED_SLASH_COMMANDS = {
+    "/help", "/tools", "/status", "/context", "/config", "/config-paths",
+    "/permissions", "/skills", "/mcp", "/model", "/memory", "/exit", "/debug",
+    "/ls", "/grep", "/read", "/write", "/modify", "/edit", "/patch", "/cmd",
+    "/compact", "/resume",
+}
+
+
+@dataclass
 class ScreenState:
     input: str = ""
     cursor_offset: int = 0
@@ -220,6 +244,14 @@ class ScreenState:
     agent_lock: Any = None
     # Tool execution时间跟踪
     tool_start_time: float | None = None
+    # Context compaction + background memory + real usage meter
+    compactor: Any = None
+    bg_memory: Any = None
+    context_used: int = 0          # provider-reported tokens used (0 = unknown)
+    context_max: int = 256_000     # max context window for the meter
+    last_user_input: str = ""      # for background memory record_turn
+    # /resume interactive picker overlay
+    session_picker: SessionPicker | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -564,10 +596,12 @@ def _history_down(state: ScreenState) -> bool:
 def _get_visible_commands(input_text: str) -> list[Any]:
     if not input_text.startswith("/"):
         return []
+    # Only expose commands that are actually implemented in the TUI.
+    available = [c for c in SLASH_COMMANDS if c.name in IMPLEMENTED_SLASH_COMMANDS]
     if input_text == "/":
-        return SLASH_COMMANDS
+        return available
     matches = find_matching_slash_commands(input_text)
-    return [cmd for cmd in SLASH_COMMANDS if getattr(cmd, "usage", str(cmd)) in matches]
+    return [cmd for cmd in available if getattr(cmd, "usage", str(cmd)) in matches]
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +736,15 @@ def _render_screen(args: TtyAppArgs, state: ScreenState) -> None:
         sys.stdout.flush()
         return
 
+    if state.session_picker is not None:
+        # /resume picker overlay
+        buf.append(render_panel("resume session", _render_session_picker(state.session_picker)))
+        buf.append(sep)
+        buf.append(_render_footer_cached("↑/↓ select · Enter resume · Esc cancel", True, has_skills, background_tasks))
+        sys.stdout.write("".join(buf))
+        sys.stdout.flush()
+        return
+
     # Transcript — snapshot the list to avoid IndexError from concurrent
     # agent-thread appends (CPython GIL makes list.append atomic but
     # iteration + append can still race on length vs slot access).
@@ -735,8 +778,39 @@ def _render_screen(args: TtyAppArgs, state: ScreenState) -> None:
     if contextual_help:
         buf.append(f"\n{SUBTLE}{contextual_help}{RESET}")
 
+    # Context usage meter, bottom-right (Claude Code style).
+    cols, _rows = _get_terminal_size()
+    meter = _format_context_meter(state)
+    buf.append(f"\n{SUBTLE}{meter.rjust(max(cols, len(meter)))}{RESET}")
+
     sys.stdout.write("".join(buf))
     sys.stdout.flush()
+
+
+def _format_context_meter(state: ScreenState) -> str:
+    """Render the context-usage indicator, e.g. 'ctx 12k/256k 5%'."""
+    max_tokens = state.context_max or 256_000
+    max_k = max(1, round(max_tokens / 1000))
+    if state.context_used > 0:
+        used_k = state.context_used / 1000
+        pct = min(100, round(state.context_used / max_tokens * 100))
+        used_str = f"{used_k:.1f}" if used_k < 10 else f"{used_k:.0f}"
+        return f"ctx {used_str}k/{max_k}k {pct}%"
+    return f"ctx --/{max_k}k"
+
+
+def _render_session_picker(picker: SessionPicker) -> str:
+    """Render the /resume session list with the selected row highlighted."""
+    if not picker.sessions:
+        return "No saved sessions for this project yet."
+    lines = ["Select a session to resume:", ""]
+    for i, meta in enumerate(picker.sessions):
+        marker = "›" if i == picker.index else " "
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(meta.updated_at))
+        first = (meta.first_message or "(empty)").replace("\n", " ")[:48]
+        row = f"{marker} [{meta.session_id[:8]}] {when}  {meta.message_count} msgs  {first}"
+        lines.append(f"{REVERSE}{row}{RESET}" if i == picker.index else row)
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -970,6 +1044,135 @@ def _execute_tool_shortcut(
 
 
 # ---------------------------------------------------------------------------
+# Manual compaction (/compact) and session picker (/resume)
+# ---------------------------------------------------------------------------
+
+
+def _start_manual_compact(
+    args: TtyAppArgs, state: ScreenState, rerender: Callable[[], None]
+) -> None:
+    """Run the LLM context compactor now, in a background thread."""
+    if state.is_busy:
+        state.status = "Current turn is still running..."
+        rerender()
+        return
+    compactor = state.compactor
+    if compactor is None or args.model is None:
+        _push_transcript_entry(state, kind="assistant", body="No compactor available.")
+        rerender()
+        return
+
+    state.is_busy = True
+    state.status = "上下文压缩中…"
+    _push_transcript_entry(state, kind="progress", body="⏳ 上下文压缩中…（手动 /compact）")
+    rerender()
+
+    def _work() -> None:
+        try:
+            before = len(args.messages)
+            result = compactor.auto_compact(list(args.messages))
+            if result is not None:
+                args.messages[:] = result
+                compactor.real_total_tokens = 0
+                state.context_used = 0
+                _push_transcript_entry(
+                    state,
+                    kind="assistant",
+                    body=f"✅ 上下文已压缩：{before} → {len(result)} 条消息（已折叠为摘要）。",
+                )
+            else:
+                _push_transcript_entry(
+                    state,
+                    kind="assistant",
+                    body="ℹ️ 当前上下文较小，无需压缩。",
+                )
+        except Exception as error:  # noqa: BLE001
+            _push_transcript_entry(state, kind="assistant", body=f"压缩失败：{error}")
+        finally:
+            state.is_busy = False
+            state.status = None
+            rerender()
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _open_session_picker(
+    args: TtyAppArgs, state: ScreenState, rerender: Callable[[], None]
+) -> None:
+    """Open the /resume picker listing this project's saved sessions."""
+    workspace = str(Path(args.cwd).resolve())
+    sessions = [m for m in list_sessions() if m.workspace == workspace]
+    if not sessions:
+        _push_transcript_entry(
+            state, kind="assistant", body="本项目目录下还没有历史 session。"
+        )
+        rerender()
+        return
+    state.session_picker = SessionPicker(sessions=sessions, index=0)
+    rerender()
+
+
+def _resume_selected_session(
+    args: TtyAppArgs, state: ScreenState, rerender: Callable[[], None]
+) -> None:
+    """Load the highlighted session in the picker into the live transcript."""
+    picker = state.session_picker
+    state.session_picker = None
+    if picker is None or not picker.sessions:
+        rerender()
+        return
+    meta = picker.sessions[picker.index]
+    loaded = load_session(meta.session_id)
+    if loaded is None:
+        _push_transcript_entry(state, kind="assistant", body="无法加载该 session。")
+        rerender()
+        return
+    if loaded.messages:
+        args.messages[:] = loaded.messages
+    state.transcript.clear()
+    for entry_data in loaded.transcript_entries:
+        try:
+            state.transcript.append(TranscriptEntry(**entry_data))
+        except TypeError:
+            pass
+    state.session = loaded
+    state.autosave = AutosaveManager(loaded)
+    state.transcript_scroll_offset = 0
+    _push_transcript_entry(
+        state,
+        kind="assistant",
+        body=f"⮌ 已恢复 session [{loaded.session_id[:8]}]：{len(loaded.messages)} 条消息。",
+    )
+    rerender()
+
+
+def _handle_session_picker_event(
+    args: TtyAppArgs,
+    state: ScreenState,
+    event: ParsedInputEvent,
+    rerender: Callable[[], None],
+) -> None:
+    """Handle keys while the /resume picker overlay is active."""
+    picker = state.session_picker
+    if picker is None:
+        return
+    if not isinstance(event, KeyEvent):
+        return
+    n = len(picker.sessions)
+    if event.name == "up":
+        picker.index = (picker.index - 1) % n
+        rerender()
+    elif event.name == "down":
+        picker.index = (picker.index + 1) % n
+        rerender()
+    elif event.name == "return":
+        _resume_selected_session(args, state, rerender)
+    elif event.name == "escape":
+        state.session_picker = None
+        rerender()
+
+
+# ---------------------------------------------------------------------------
 # Input handling
 # ---------------------------------------------------------------------------
 
@@ -1042,6 +1245,16 @@ def _handle_input(
         _push_transcript_entry(state, kind="assistant", body="\n".join(lines))
         return False
 
+    # /compact — manual context compaction (runs the LLM summarizer now)
+    if input_text == "/compact":
+        _start_manual_compact(args, state, rerender)
+        return False
+
+    # /resume — open the per-project session picker (↑/↓ + Enter)
+    if input_text == "/resume":
+        _open_session_picker(args, state, rerender)
+        return False
+
     # Local commands
     local_result = try_handle_local_command(input_text, tools=args.tools)
     if local_result is not None:
@@ -1075,7 +1288,8 @@ def _handle_input(
     state.transcript_scroll_offset = 0
     state.status = "Thinking..."
     state.is_busy = True
-    
+    state.last_user_input = input_text
+
     # Update app state
     if state.app_state:
         from minicode.state import set_busy
@@ -1086,6 +1300,28 @@ def _handle_input(
     pending_tool_entries: dict[str, list[int]] = defaultdict(list)
     aggregated_edit_by_key: dict[str, AggregatedEditProgress] = {}
     aggregated_edit_by_entry_id: dict[int, AggregatedEditProgress] = {}
+    turn_tool_names: list[str] = []
+
+    def on_usage(usage: dict) -> None:
+        used = (
+            int(usage.get("input_tokens", 0))
+            + int(usage.get("cache_read_input_tokens", 0))
+            + int(usage.get("cache_creation_input_tokens", 0))
+            + int(usage.get("output_tokens", 0))
+        )
+        if used > 0:
+            state.context_used = used
+            rerender()
+
+    def on_compaction(kind: str, util: float) -> None:
+        if kind == "autocompact_start":
+            state.status = "上下文压缩中…"
+            _push_transcript_entry(state, kind="progress", body="⏳ 上下文压缩中…（auto-compact）")
+        elif kind == "autocompact":
+            _push_transcript_entry(
+                state, kind="assistant", body=f"✅ 上下文已压缩（当前约 {int(util * 100)}%）"
+            )
+        rerender()
 
     # Refresh system prompt
     args.messages[0] = {
@@ -1115,6 +1351,7 @@ def _handle_input(
         state.status = f"Running {tool_name}..."
         state.active_tool = tool_name
         state.tool_start_time = time.monotonic()  # 记录工具启动时间
+        turn_tool_names.append(tool_name)
 
         target_path = _extract_path_from_tool_input(tool_input)
         can_aggregate = _is_file_edit_tool(tool_name) and target_path is not None
@@ -1271,9 +1508,21 @@ def _handle_input(
                 on_tool_result=on_tool_result,
                 on_assistant_message=on_assistant_message,
                 on_progress_message=on_progress_message,
+                on_usage=on_usage,
+                on_compaction=on_compaction,
+                compactor=state.compactor,
             )
             with agent_thread_lock:
                 agent_result["messages"] = next_messages
+            # Feed the per-turn summary to background memory (user question +
+            # final agent summary + tool names; no code/tool output).
+            if state.bg_memory is not None:
+                final = next(
+                    (m["content"] for m in reversed(next_messages)
+                     if m.get("role") == "assistant"),
+                    "",
+                )
+                state.bg_memory.record_turn(state.last_user_input, final, turn_tool_names)
         except Exception as e:
             agent_error = e
         finally:
@@ -1424,6 +1673,30 @@ def run_tty_app(
     def rerender() -> None:
         throttled.request()
 
+    # ---- Context compaction + background memory + usage meter ----
+    max_context = int(os.environ.get("MINI_CODE_CONTEXT_WINDOW") or 256_000)
+    model_name = runtime.get("model", "default") if runtime else "default"
+    state.context_max = max_context
+    state.compactor = ContextCompactor(
+        model_adapter=model, model_name=model_name, window=max_context
+    )
+
+    def _on_memory_write(written: list[dict[str, Any]]) -> None:
+        _push_transcript_entry(
+            state,
+            kind="assistant",
+            body=f"🧠 后台记忆已自动存储（{len(written)} 条）",
+        )
+        rerender()
+
+    state.bg_memory = BackgroundMemoryExtractor(
+        model_adapter=model,
+        memory_manager=MemoryManager(workspace=cwd),
+        workspace=cwd,
+        enabled=os.environ.get("MINI_CODE_BACKGROUND_MEMORY", "1") != "0",
+        on_write=_on_memory_write,
+    )
+
     input_remainder = ""
     should_exit = False
     # Autosave throttle: check at most every ~2 seconds, not every 20ms
@@ -1546,6 +1819,13 @@ def run_tty_app(
 
             _signal.signal(_signal.SIGWINCH, _prev_sigwinch)
 
+        # Flush background memory (final synchronous extraction before exit).
+        if state.bg_memory is not None:
+            try:
+                state.bg_memory.close()
+            except Exception:  # noqa: BLE001
+                pass
+
         show_cursor()
         exit_alternate_screen()
         
@@ -1612,6 +1892,11 @@ def _handle_event(
         raise SystemExit(0)
     if isinstance(event, TextEvent) and event.ctrl and event.text == "c":
         raise SystemExit(0)
+
+    # ---------- Session picker (/resume) overlay ----------
+    if state.session_picker is not None:
+        _handle_session_picker_event(args, state, event, rerender)
+        return
 
     # ---------- Pending approval mode ----------
     # Capture locally to avoid TOCTOU — the agent thread may clear

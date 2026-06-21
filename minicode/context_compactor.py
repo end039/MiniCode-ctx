@@ -202,6 +202,9 @@ class ContextCompactor:
     disabled: bool = False
     failures: int = 0
     _last_autocompact_tokens: int = 0
+    # Real token count reported by the provider for the last call; when > 0 it
+    # replaces the heuristic estimate for utilization (design point: use real usage).
+    real_total_tokens: int = 0
     # toolUseId -> original tool-result content (for restore_cleared)
     _cleared: dict[str, str] = field(default_factory=dict)
     # archived spans replaced by auto_compact (for rewind/restore)
@@ -210,6 +213,20 @@ class ContextCompactor:
     def __post_init__(self) -> None:
         if self.window <= 0:
             self.window = context_window_for(self.model_name)
+
+    def set_real_tokens(self, total_tokens: int) -> None:
+        """Record the provider-reported context size of the last call."""
+        if total_tokens and total_tokens > 0:
+            self.real_total_tokens = int(total_tokens)
+
+    def current_tokens(self, messages: list[dict[str, Any]]) -> int:
+        """Best available token count: provider-reported if known, else estimate."""
+        return self.real_total_tokens or estimate_messages_tokens(messages)
+
+    def current_utilization(self, messages: list[dict[str, Any]]) -> float:
+        if self.window <= 0:
+            return 0.0
+        return self.current_tokens(messages) / self.window
 
     # -- public entry point: call at the top of every agent-loop step --------
 
@@ -226,14 +243,14 @@ class ContextCompactor:
         best-effort and falls back to the input on any failure.
         """
         msgs = messages
-        util = utilization(msgs, self.window)
+        util = self.current_utilization(msgs)
 
         # Tier 1: micro-compact every step (cheap, no LLM, reversible).
         if util >= MICROCOMPACT_UTILIZATION:
             compacted = self.microcompact(msgs)
             if compacted is not msgs:
                 msgs = compacted
-                util = utilization(msgs, self.window)
+                util = self.current_utilization(msgs)
                 if on_event:
                     on_event("microcompact", util)
 
@@ -245,16 +262,22 @@ class ContextCompactor:
             and util >= AUTOCOMPACT_UTILIZATION
             and self._should_autocompact(msgs)
         ):
+            if on_event:
+                on_event("autocompact_start", util)  # surfaces "compacting…" in the UI
             compacted = self.auto_compact(msgs)
             if compacted is not None:
                 msgs = compacted
+                # Real token count is now stale; fall back to the estimate.
+                self.real_total_tokens = 0
                 if on_event:
-                    on_event("autocompact", utilization(msgs, self.window))
+                    on_event("autocompact", self.current_utilization(msgs))
+            elif on_event:
+                on_event("autocompact_skipped", util)
 
         return msgs
 
     def _should_autocompact(self, messages: list[dict[str, Any]]) -> bool:
-        tokens = estimate_messages_tokens(messages)
+        tokens = self.current_tokens(messages)
         if self._last_autocompact_tokens == 0:
             return True
         return tokens >= self._last_autocompact_tokens * AUTOCOMPACT_REGROWTH_FACTOR

@@ -28,7 +28,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from minicode.logging_config import get_logger
 from minicode.memory import MemoryManager, MemoryScope
@@ -97,6 +97,7 @@ class BackgroundMemoryExtractor:
         enabled: bool = True,
         project_name: Optional[str] = None,
         include_tool_names: bool = True,
+        on_write: Optional[Callable[[list[dict[str, Any]]], None]] = None,
     ) -> None:
         self.model_adapter = model_adapter
         self.memory = memory_manager
@@ -105,6 +106,8 @@ class BackgroundMemoryExtractor:
         self.enabled = enabled and model_adapter is not None
         self.project_name = project_name or _basename(workspace)
         self.include_tool_names = include_tool_names
+        # Called (from the worker thread) with the list of facts just written.
+        self.on_write = on_write
 
         self._pending: list[TurnSummary] = []
         self._turn_count = 0
@@ -260,6 +263,11 @@ class BackgroundMemoryExtractor:
                 self.memory.add_entry(scope, category, content, tags=["auto"])
             written.append({"scope": scope.value, "category": category, "content": content})
             logger.info("memory[%s/%s] += %s", scope.value, category, content)
+        if written and self.on_write is not None:
+            try:
+                self.on_write(written)
+            except Exception as error:  # noqa: BLE001 - UI callback is best-effort
+                logger.warning("memory on_write callback failed: %s", error)
         return written
 
     def _is_duplicate(self, scope: MemoryScope, content: str) -> bool:
