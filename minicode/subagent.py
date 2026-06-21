@@ -177,6 +177,7 @@ def run_explore_subagent(
     agent_type: str = "explore",
     make_model: Callable[[ToolRegistry], ModelAdapter] | None = None,
     max_steps: int | None = None,
+    container: str | None = None,
 ) -> str:
     """Run one isolated read-only exploration and return its final answer.
 
@@ -233,6 +234,7 @@ def run_explore_subagent(
             cwd=cwd,
             permissions=permissions,
             max_steps=max_steps,
+            tool_container=container,
         )
 
         final = _last_assistant(result_messages)
@@ -252,6 +254,7 @@ def run_explore_subagent(
                 cwd=cwd,
                 permissions=permissions,
                 max_steps=2,
+                tool_container=container,
             )
             wrap_final = _last_assistant(wrap_out)
             if wrap_final and _STEP_LIMIT_MARKER not in wrap_final:

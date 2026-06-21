@@ -78,6 +78,9 @@ def create_dispatch_agent_tool(
                 tracker=tracker,
                 agent_type=parsed["agent_type"],
                 make_model=make_model,
+                # Propagate the container so the read-only sub-agent explores
+                # inside the same container (e.g. SWE-bench /testbed), not the host.
+                container=getattr(context, "container", None),
             )
         except Exception as error:  # noqa: BLE001
             return ToolResult(ok=False, output=f"sub-agent failed: {error}")

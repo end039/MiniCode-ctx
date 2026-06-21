@@ -151,6 +151,46 @@ class TestDispatchTool(unittest.TestCase):
         self.assertIn("requires a configured model", res.output)
 
 
+class TestContainerPropagation(unittest.TestCase):
+    def test_subagent_passes_container_to_run_agent_turn(self):
+        import minicode.agent_loop as al
+        captured = {}
+
+        def fake(**kw):
+            captured.update(kw)
+            return [{"role": "assistant", "content": "done"}]
+
+        orig = al.run_agent_turn
+        al.run_agent_turn = fake
+        try:
+            run_explore_subagent(
+                task="t", cwd="/testbed",
+                make_model=lambda r: _FinalModel(), container="cid123",
+            )
+        finally:
+            al.run_agent_turn = orig
+        self.assertEqual(captured.get("tool_container"), "cid123")
+        self.assertEqual(captured.get("cwd"), "/testbed")
+
+    def test_dispatch_tool_forwards_context_container(self):
+        import minicode.tools.dispatch_agent as da
+        captured = {}
+
+        def fake_run(**kw):
+            captured.update(kw)
+            return "[explore sub-agent · 0 read/search step(s)]\nok"
+
+        orig = da.run_explore_subagent
+        da.run_explore_subagent = fake_run
+        try:
+            tool = create_dispatch_agent_tool(cwd="/testbed", runtime={"model": "x"})
+            tool.run(tool.validator({"task": "find it"}),
+                     ToolContext(cwd="/testbed", permissions=None, container="cidABC"))
+        finally:
+            da.run_explore_subagent = orig
+        self.assertEqual(captured.get("container"), "cidABC")
+
+
 class TestStepBudget(unittest.TestCase):
     def test_default_is_generous(self):
         from minicode.subagent import _subagent_max_steps, DEFAULT_SUBAGENT_MAX_STEPS
