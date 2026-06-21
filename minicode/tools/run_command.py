@@ -7,6 +7,7 @@ import sys
 from typing import Sequence
 
 from minicode.background_tasks import register_background_shell_task
+from minicode.exec_backend import CONTAINER_EXEC_TIMEOUT, maybe_container_backend
 from minicode.tooling import ToolDefinition, ToolResult
 from minicode.workspace import resolve_tool_path
 
@@ -175,7 +176,45 @@ def _validate(input_data: dict) -> dict:
     return {"command": command, "args": [str(arg) for arg in args], "cwd": cwd}
 
 
+def _build_shell_command(input_data: dict, normalized_args: list[str]) -> str:
+    """Reconstruct a single shell command string from the tool input.
+
+    If explicit ``args`` were given, join command + quoted args; otherwise the
+    ``command`` field already is a (possibly compound) shell snippet.
+    """
+    if input_data.get("args"):
+        return " ".join([input_data["command"], *(shlex.quote(a) for a in normalized_args)])
+    return input_data["command"]
+
+
+def _run_in_container(input_data: dict, context, backend) -> ToolResult:
+    cwd = (
+        backend.resolve(context.cwd, input_data["cwd"])
+        if input_data.get("cwd")
+        else context.cwd
+    )
+    normalized_command, normalized_args = _normalize_command_input(input_data)
+    if not normalized_command:
+        return ToolResult(ok=False, output="Command not allowed: empty command")
+
+    command_str = _build_shell_command(input_data, normalized_args)
+    # The container is the sandbox. Still honour an explicit permission manager
+    # for non-read-only commands, but validate against the in-container cwd.
+    if context.permissions is not None and not _is_read_only_command(normalized_command):
+        context.permissions.ensure_command("sh", ["-lc", command_str], cwd)
+
+    code, out, err = backend.run_shell(command_str, cwd, CONTAINER_EXEC_TIMEOUT)
+    output = "\n".join(part for part in [out.strip(), err.strip()] if part).strip()
+    if code == 124:
+        return ToolResult(ok=False, output=output or f"Command timed out: {command_str}")
+    return ToolResult(ok=(code == 0), output=output)
+
+
 def _run(input_data: dict, context) -> ToolResult:
+    backend = maybe_container_backend(context)
+    if backend is not None:
+        return _run_in_container(input_data, context, backend)
+
     effective_cwd = str(resolve_tool_path(context, input_data["cwd"], "list")) if input_data.get("cwd") else context.cwd
     normalized_command, normalized_args = _normalize_command_input(input_data)
     if not normalized_command:

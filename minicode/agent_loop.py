@@ -97,6 +97,7 @@ def run_agent_turn(
     on_compaction: Callable[[str, float], None] | None = None,
     context_manager: ContextManager | None = None,
     compactor: ContextCompactor | None = None,
+    tool_container: str | None = None,
 ) -> list[ChatMessage]:
     current_messages = list(messages)
     saw_tool_result = False
@@ -324,7 +325,7 @@ def run_agent_turn(
             result = tools.execute(
                 call["toolName"],
                 call["input"],
-                ToolContext(cwd=cwd, permissions=permissions),
+                ToolContext(cwd=cwd, permissions=permissions, container=tool_container),
             )
             if on_tool_result:
                 on_tool_result(call["toolName"], result.output, not result.ok)

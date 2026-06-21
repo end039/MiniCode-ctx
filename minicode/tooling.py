@@ -105,6 +105,10 @@ class ToolResult:
 class ToolContext:
     cwd: str
     permissions: Any | None = None
+    # When set, file/command tools execute inside this Docker container
+    # (cwd is then a path *inside* the container, e.g. /testbed). See
+    # minicode.exec_backend. None ⇒ normal host execution.
+    container: str | None = None
 
 
 Validator = Callable[[Any], Any]

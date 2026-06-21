@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
+from minicode.exec_backend import maybe_container_backend
 from minicode.tooling import ToolDefinition, ToolResult
 from minicode.workspace import resolve_tool_path
+
+# Cap on grep output lines (container branch) to avoid flooding the context.
+_GREP_MAX_LINES = 500
 
 
 def _validate(input_data: dict) -> dict:
@@ -17,7 +22,32 @@ def _validate(input_data: dict) -> dict:
     }
 
 
+def _run_in_container(input_data: dict, context, backend) -> ToolResult:
+    target = backend.resolve(context.cwd, input_data["path"])
+    # -r recursive, -n line numbers, -I skip binary, -E extended regex.
+    cmd = f"grep -rnI -E -- {shlex.quote(input_data['pattern'])} {shlex.quote(target)}"
+    code, out, err = backend.run_shell(cmd, context.cwd, 60)
+    if code == 1:  # grep: no matches
+        return ToolResult(ok=True, output="No matches found.")
+    if code not in (0, 1):
+        return ToolResult(ok=False, output=err.strip() or "grep failed in container")
+    lines = [ln for ln in out.splitlines() if ln]
+    if not lines:
+        return ToolResult(ok=True, output="No matches found.")
+    if len(lines) > _GREP_MAX_LINES:
+        shown = "\n".join(lines[:_GREP_MAX_LINES])
+        return ToolResult(
+            ok=True,
+            output=f"{shown}\n\n⚠️ Results truncated at {_GREP_MAX_LINES} lines.",
+        )
+    return ToolResult(ok=True, output="\n".join(lines))
+
+
 def _run(input_data: dict, context) -> ToolResult:
+    backend = maybe_container_backend(context)
+    if backend is not None:
+        return _run_in_container(input_data, context, backend)
+
     root = resolve_tool_path(context, input_data["path"], "search")
     regex = re.compile(input_data["pattern"])
     results: list[str] = []

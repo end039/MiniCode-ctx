@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from minicode.exec_backend import maybe_container_backend
 from minicode.file_review import apply_reviewed_file_change, load_existing_file
 from minicode.tooling import ToolDefinition
 from minicode.workspace import resolve_tool_path
@@ -24,15 +25,21 @@ def _validate(input_data: dict) -> dict:
 
 
 def _run(input_data: dict, context):
-    target = resolve_tool_path(context, input_data["path"], "write")
-    content = load_existing_file(target)
+    backend = maybe_container_backend(context)
+    if backend is not None:
+        target = backend.resolve(context.cwd, input_data["path"])
+    else:
+        target = resolve_tool_path(context, input_data["path"], "write")
+    content = load_existing_file(target, backend)
     if input_data["search"] not in content:
         raise ValueError(f"Text not found in {input_data['path']}")
     if input_data["replace_all"]:
         next_content = input_data["replace"].join(content.split(input_data["search"]))
     else:
         next_content = content.replace(input_data["search"], input_data["replace"], 1)
-    return apply_reviewed_file_change(context, input_data["path"], target, next_content)
+    return apply_reviewed_file_change(
+        context, input_data["path"], target, next_content, backend
+    )
 
 
 edit_file_tool = ToolDefinition(

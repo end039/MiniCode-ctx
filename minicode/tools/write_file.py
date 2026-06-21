@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from minicode.exec_backend import maybe_container_backend
 from minicode.file_review import apply_reviewed_file_change
 from minicode.tooling import ToolDefinition
 from minicode.workspace import resolve_tool_path
@@ -16,8 +17,14 @@ def _validate(input_data: dict) -> dict:
 
 
 def _run(input_data: dict, context):
-    target = resolve_tool_path(context, input_data["path"], "write")
-    return apply_reviewed_file_change(context, input_data["path"], target, input_data["content"])
+    backend = maybe_container_backend(context)
+    if backend is not None:
+        target = backend.resolve(context.cwd, input_data["path"])
+    else:
+        target = resolve_tool_path(context, input_data["path"], "write")
+    return apply_reviewed_file_change(
+        context, input_data["path"], target, input_data["content"], backend
+    )
 
 
 write_file_tool = ToolDefinition(

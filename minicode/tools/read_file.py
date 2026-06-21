@@ -5,6 +5,7 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
+from minicode.exec_backend import maybe_container_backend
 from minicode.tooling import ToolDefinition, ToolResult
 from minicode.workspace import resolve_tool_path
 
@@ -59,9 +60,38 @@ def _validate(input_data: dict) -> dict:
     return {"path": path, "offset": offset, "limit": limit}
 
 
-def _run(input_data: dict, context) -> ToolResult:
-    target = resolve_tool_path(context, input_data["path"], "read")
+def _render(label: str, content: str, offset: int, limit: int) -> str:
+    """Build the read_file output (header + sliced chunk)."""
+    end = min(len(content), offset + limit)
+    chunk = content[offset:end]
+    truncated = end < len(content)
+    header = "\n".join(
+        [
+            f"FILE: {label}",
+            f"OFFSET: {offset}",
+            f"END: {end}",
+            f"TOTAL_CHARS: {len(content)}",
+            f"TRUNCATED: {'yes - call read_file again with offset ' + str(end) if truncated else 'no'}",
+            "",
+        ]
+    )
+    return header + chunk
 
+
+def _run(input_data: dict, context) -> ToolResult:
+    offset = input_data["offset"]
+    limit = input_data["limit"]
+
+    backend = maybe_container_backend(context)
+    if backend is not None:
+        path = backend.resolve(context.cwd, input_data["path"])
+        try:
+            content = backend.read_text(path)
+        except FileNotFoundError:
+            return ToolResult(ok=False, output=f"File {input_data['path']} not found in container.")
+        return ToolResult(ok=True, output=_render(input_data["path"], content, offset, limit))
+
+    target = resolve_tool_path(context, input_data["path"], "read")
     try:
         # 使用缓存读取
         content = _get_cached_file_content(target)
@@ -70,23 +100,8 @@ def _run(input_data: dict, context) -> ToolResult:
             ok=False,
             output=f"File {input_data['path']} appears to be binary. Cannot read as text.",
         )
-    
-    offset = input_data["offset"]
-    limit = input_data["limit"]
-    end = min(len(content), offset + limit)
-    chunk = content[offset:end]
-    truncated = end < len(content)
-    header = "\n".join(
-        [
-            f"FILE: {input_data['path']}",
-            f"OFFSET: {offset}",
-            f"END: {end}",
-            f"TOTAL_CHARS: {len(content)}",
-            f"TRUNCATED: {'yes - call read_file again with offset ' + str(end) if truncated else 'no'}",
-            "",
-        ]
-    )
-    return ToolResult(ok=True, output=header + chunk)
+
+    return ToolResult(ok=True, output=_render(input_data["path"], content, offset, limit))
 
 
 read_file_tool = ToolDefinition(

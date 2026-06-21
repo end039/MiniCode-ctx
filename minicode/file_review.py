@@ -22,7 +22,10 @@ def build_unified_diff(file_path: str, before: str, after: str) -> str:
     return "\n".join(lines)
 
 
-def load_existing_file(target_path: str | Path) -> str:
+def load_existing_file(target_path: str | Path, backend=None) -> str:
+    if backend is not None:
+        path = str(target_path)
+        return backend.read_text(path) if backend.exists(path) else ""
     file_path = Path(target_path)
     if not file_path.exists():
         return ""
@@ -34,16 +37,21 @@ def apply_reviewed_file_change(
     file_path: str,
     target_path: str | Path,
     next_content: str,
+    backend=None,
 ) -> ToolResult:
-    target = Path(target_path)
-    previous_content = load_existing_file(target)
+    previous_content = load_existing_file(target_path, backend)
     if previous_content == next_content:
         return ToolResult(ok=True, output=f"No changes needed for {file_path}")
 
     diff = build_unified_diff(file_path, previous_content, next_content)
     if context.permissions is not None:
-        context.permissions.ensure_edit(str(target), diff)
+        context.permissions.ensure_edit(str(target_path), diff)
 
+    if backend is not None:
+        backend.write_text(str(target_path), next_content)
+        return ToolResult(ok=True, output=f"Applied reviewed changes to {file_path}")
+
+    target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(next_content, encoding="utf-8")
     return ToolResult(ok=True, output=f"Applied reviewed changes to {file_path}")

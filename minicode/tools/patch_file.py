@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from minicode.exec_backend import maybe_container_backend
 from minicode.file_review import apply_reviewed_file_change, load_existing_file
 from minicode.tooling import ToolDefinition, ToolResult
 from minicode.workspace import resolve_tool_path
@@ -37,8 +38,12 @@ def _validate(input_data: dict) -> dict:
 
 
 def _run(input_data: dict, context):
-    target = resolve_tool_path(context, input_data["path"], "write")
-    content = load_existing_file(target)
+    backend = maybe_container_backend(context)
+    if backend is not None:
+        target = backend.resolve(context.cwd, input_data["path"])
+    else:
+        target = resolve_tool_path(context, input_data["path"], "write")
+    content = load_existing_file(target, backend)
     applied: list[str] = []
     for index, replacement in enumerate(input_data["replacements"], start=1):
         if replacement["search"] not in content:
@@ -50,7 +55,9 @@ def _run(input_data: dict, context):
         else:
             content = content.replace(replacement["search"], replacement["replace"], 1)
             applied.append(f"#{index} replaceOnce")
-    result = apply_reviewed_file_change(context, input_data["path"], target, content)
+    result = apply_reviewed_file_change(
+        context, input_data["path"], target, content, backend
+    )
     if not result.ok:
         return result
     return ToolResult(
