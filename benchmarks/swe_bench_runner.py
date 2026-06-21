@@ -69,6 +69,8 @@ How to work:
 3. Keep the change minimal and targeted at the issue.
 4. You may run the project's own tests to check your fix, e.g. for Django:
    run_command  python tests/runtests.py <dotted.test.module> --parallel=1
+   IMPORTANT: always target a SPECIFIC test module; never run the whole test
+   suite (it is slow and memory-heavy). Use --parallel=1 to limit memory.
 
 Response protocol:
 - While still working (more tool calls coming), begin your message with <progress>.
