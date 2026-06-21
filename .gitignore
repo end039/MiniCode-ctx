@@ -49,3 +49,15 @@ Thumbs.db
 .mini-code-memory/
 .mini-code-memory-local/
 context_state.json
+
+# SWE-bench 评测产物(由 run_evaluation / pick_django.py 重新生成，不提交)
+/logs/
+*.minicode-*.json
+benchmarks/subset.json
+benchmarks/gold_preds.jsonl
+benchmarks/*.jsonl
+
+# 根目录临时脚本/产物
+/_*.sh
+/_*.py
+/_*.txt
