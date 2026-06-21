@@ -112,5 +112,46 @@ class TestSessionPicker(unittest.TestCase):
         self.assertIn("No saved sessions", out)
 
 
+class TestThinkingDisable(unittest.TestCase):
+    def test_disabled_for_non_anthropic(self):
+        from minicode.anthropic_adapter import _should_disable_thinking
+        self.assertTrue(
+            _should_disable_thinking({"baseUrl": "https://api.deepseek.com/anthropic"})
+        )
+        self.assertFalse(
+            _should_disable_thinking({"baseUrl": "https://api.anthropic.com"})
+        )
+
+    def test_env_overrides(self):
+        from minicode.anthropic_adapter import _should_disable_thinking
+        os.environ["MINI_CODE_EXTENDED_THINKING"] = "1"
+        try:
+            self.assertFalse(
+                _should_disable_thinking({"baseUrl": "https://api.deepseek.com/anthropic"})
+            )
+        finally:
+            os.environ.pop("MINI_CODE_EXTENDED_THINKING", None)
+
+
+class TestForceCompact(unittest.TestCase):
+    class _Fake:
+        def next(self, messages):
+            from minicode.types import AgentStep
+            return AgentStep(type="assistant", content="SUMMARY")
+
+    def test_force_compacts_small_conversation(self):
+        from minicode.context_compactor import ContextCompactor
+        c = ContextCompactor(model_adapter=self._Fake(), model_name="x", window=1000)
+        msgs = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "u1"}, {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"}, {"role": "assistant", "content": "a2 latest"},
+        ]
+        self.assertIsNone(c.auto_compact(msgs))             # normal: too small -> no-op
+        forced = c.auto_compact(msgs, force=True)            # force: compacts anyway
+        self.assertIsNotNone(forced)
+        self.assertTrue(any(m.get("content") == "a2 latest" for m in forced))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

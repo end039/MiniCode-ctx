@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 import urllib.error
@@ -147,6 +148,20 @@ def _to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str, list[di
     return system, converted
 
 
+def _should_disable_thinking(runtime: dict[str, Any]) -> bool:
+    """Disable extended thinking unless on the official Anthropic API.
+
+    ``MINI_CODE_EXTENDED_THINKING=1`` forces thinking on; ``=0`` forces it off.
+    """
+    override = os.environ.get("MINI_CODE_EXTENDED_THINKING", "").strip()
+    if override == "1":
+        return False
+    if override == "0":
+        return True
+    base_url = str(runtime.get("baseUrl", "")).lower()
+    return "api.anthropic.com" not in base_url
+
+
 class AnthropicModelAdapter:
     def __init__(self, runtime: dict[str, Any], tools) -> None:
         self.runtime = runtime
@@ -169,6 +184,13 @@ class AnthropicModelAdapter:
         }
         if self.runtime.get("maxOutputTokens") is not None:
             request_body["max_tokens"] = self.runtime["maxOutputTokens"]
+
+        # Extended thinking: non-Anthropic endpoints (e.g. DeepSeek) return
+        # `thinking` blocks that must be echoed back verbatim on every follow-up
+        # request, which breaks the multi-step tool loop. Disable thinking on
+        # those endpoints by default. Opt back in with MINI_CODE_EXTENDED_THINKING=1.
+        if _should_disable_thinking(self.runtime):
+            request_body["thinking"] = {"type": "disabled"}
 
         request = urllib.request.Request(
             url=self.runtime["baseUrl"].rstrip("/") + "/v1/messages",

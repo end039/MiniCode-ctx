@@ -56,6 +56,7 @@ BLOCKED_UTILIZATION = 0.95        # informational: context is critically full
 
 KEEP_RECENT_TOOL_RESULTS = 3      # microcompact keeps this many recent results
 MIN_KEEP_MESSAGES = 6             # auto-compact always keeps at least this many
+FORCE_KEEP_MESSAGES = 2           # manual /compact keeps only this many recent
 MIN_KEEP_TOKENS = 10_000          # informational floor for the kept window
 MAX_KEEP_TOKENS = 40_000          # auto-compact keeps roughly this many recent tokens
 
@@ -318,13 +319,17 @@ class ContextCompactor:
     # -- tier 2: LLM auto-compact -------------------------------------------
 
     def auto_compact(
-        self, messages: list[dict[str, Any]]
+        self, messages: list[dict[str, Any]], *, force: bool = False
     ) -> Optional[list[dict[str, Any]]]:
         """Summarize older messages into one summary, keeping recent ones.
 
         Returns the new message list, or ``None`` if nothing was compacted.
         Implements design point (c): folds any previous summary plus the older
         conversation into a fresh summary and keeps the most recent N tokens.
+
+        ``force=True`` (manual ``/compact``) ignores the size guards and keeps
+        only the last :data:`FORCE_KEEP_MESSAGES`, so it compacts even a small
+        conversation as long as there is something to summarize.
         """
         if self.model_adapter is None:
             return None
@@ -334,10 +339,16 @@ class ContextCompactor:
             ]
             prior_summaries = [m for m in messages if _is_summary(m)]
             convo = [m for m in messages if m.get("role") != "system"]
-            if len(convo) <= MIN_KEEP_MESSAGES:
-                return None
 
-            boundary = _find_retention_boundary(convo, self.window)
+            if force:
+                # Need at least one message to compress plus the kept tail.
+                if len(convo) < FORCE_KEEP_MESSAGES + 1:
+                    return None
+                boundary = _align_boundary(convo, len(convo) - FORCE_KEEP_MESSAGES)
+            else:
+                if len(convo) <= MIN_KEEP_MESSAGES:
+                    return None
+                boundary = _find_retention_boundary(convo, self.window)
             if boundary <= 0:
                 return None
             to_compress = convo[:boundary]

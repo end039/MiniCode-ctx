@@ -1070,7 +1070,7 @@ def _start_manual_compact(
     def _work() -> None:
         try:
             before = len(args.messages)
-            result = compactor.auto_compact(list(args.messages))
+            result = compactor.auto_compact(list(args.messages), force=True)
             if result is not None:
                 args.messages[:] = result
                 compactor.real_total_tokens = 0
