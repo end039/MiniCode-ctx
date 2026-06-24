@@ -121,6 +121,11 @@ python tests/test_tui_features.py
 
 本仓为学习用途的二次开发，新增能力上下文工程、多 Agent、后台记忆、Docker 沙箱、SWE-bench 评测。
 
+> 注：fork 基座 [MiniCode-Python](https://github.com/QUSETIONS/MiniCode-Python) 自带的一批 AI 生成过程文档（`*_REPORT.md` / `*_AUDIT*.md` 等）已从本仓移除，以保持根目录整洁。
+
 ## 📄 License
 
-MIT（沿用上游）— 见 [LICENSE](LICENSE)。
+本项目沿用 **MIT**，见 [LICENSE](LICENSE)。代码谱系：版权源头为 MIT 协议的
+[MiniCode](https://github.com/LiuMengxuan04/MiniCode)（[@LiuMengxuan04](https://github.com/LiuMengxuan04)，最初的 TypeScript 实现）；
+直接 fork 源 [MiniCode-Python](https://github.com/QUSETIONS/MiniCode-Python)（[@QUSETIONS](https://github.com/QUSETIONS)，Python 移植）未单独声明协议。
+本仓库的新增/改动部分版权归 pfli，同样以 MIT 释出。
